@@ -1,6 +1,7 @@
 import requests
 from bs4 import BeautifulSoup
 import time
+import os
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
@@ -17,11 +18,13 @@ def send_telegram(token, chat_id, message):
 
 def get_driver():
     chrome_options = Options()
-    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--headless") 
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
+    # Mask automation to fool the Mediator
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled") 
     return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
 
 def resolve_10gbps_link(driver, link, status_callback):
@@ -31,7 +34,8 @@ def resolve_10gbps_link(driver, link, status_callback):
         driver.switch_to.new_window('tab')
         driver.get(link)
         wait = WebDriverWait(driver, 30)
-        btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//a[contains(text(), 'Download Here')] | //button[contains(text(), 'Download Here')]")))
+        # Look for "Download Here" loosely
+        btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'Download Here')]")))
         final_link = btn.get_attribute('href')
         driver.close()
         driver.switch_to.window(original_window)
@@ -48,7 +52,7 @@ def resolve_all_mirrors(initial_link, mediator_domain, hubdrive_domain, status_c
     try:
         status_callback(f"  > Opening Link...")
         driver.get(initial_link)
-        wait = WebDriverWait(driver, 30)
+        wait = WebDriverWait(driver, 40) # Increased timeout
         
         # --- HUBDRIVE PHASE ---
         if hubdrive_domain in driver.current_url or "HubDrive" in driver.title:
@@ -58,20 +62,47 @@ def resolve_all_mirrors(initial_link, mediator_domain, hubdrive_domain, status_c
                 driver.get(hubcloud_btn.get_attribute('href'))
             except: pass
 
-        # --- MEDIATOR PHASE ---
+        # --- MEDIATOR PHASE (FIXED) ---
         if mediator_domain in driver.current_url or "Mediator" in driver.title:
-            status_callback("  > Mediator found. Waiting for Timer...")
-            continue_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'CLICK TO CONTINUE')] | //a[contains(text(), 'CLICK TO CONTINUE')]")))
-            time.sleep(1)
-            status_callback("  > Timer done. Clicking Continue...")
-            driver.execute_script("arguments[0].click();", continue_btn)
+            status_callback("  > Mediator found. Waiting 15s for Timer...")
+            
+            # 1. Force wait for the timer to definitely finish
+            time.sleep(16) 
+            
+            # 2. "Nuclear" XPath: Find ANY element containing "CONTINUE" (case insensitive)
+            # This handles <span>Click to Continue</span>, <button>CONTINUE</button>, etc.
+            status_callback("  > Clicking Continue...")
+            
+            try:
+                # Try specific button first
+                continue_btn = driver.find_element(By.XPATH, "//*[contains(text(), 'CLICK TO CONTINUE')]")
+                driver.execute_script("arguments[0].click();", continue_btn)
+            except:
+                # Fallback: Click the first big blue button we find
+                try:
+                    btns = driver.find_elements(By.TAG_NAME, "button")
+                    for btn in btns:
+                        if "CONTINUE" in btn.text.upper():
+                            driver.execute_script("arguments[0].click();", btn)
+                            break
+                except:
+                    status_callback("  > Could not find button!")
+
+            # Wait for redirect
             wait.until(lambda d: "hubcloud" in d.current_url or "drive" in d.current_url)
 
         # --- HUBCLOUD PHASE ---
         if "hubcloud" in driver.current_url or "drive" in driver.current_url:
             status_callback("  > HubCloud found. Generating links...")
-            generate_btn = wait.until(EC.element_to_be_clickable((By.ID, "download")))
-            driver.execute_script("arguments[0].click();", generate_btn)
+            
+            # Click Generate (wait for ID 'download')
+            try:
+                generate_btn = wait.until(EC.element_to_be_clickable((By.ID, "download")))
+                driver.execute_script("arguments[0].click();", generate_btn)
+            except:
+                # Fallback if ID is missing, search by text
+                generate_btn = driver.find_element(By.XPATH, "//*[contains(text(), 'Generate Direct Download')]")
+                driver.execute_script("arguments[0].click();", generate_btn)
             
             status_callback("  > Waiting for server list...")
             wait.until(EC.presence_of_element_located((By.XPATH, "//a[contains(., 'Download [')]")))
@@ -89,6 +120,7 @@ def resolve_all_mirrors(initial_link, mediator_domain, hubdrive_domain, status_c
                     final_results.append(f"🔴 <b>{name}:</b> {res_lnk}")
                 else:
                     final_results.append(f"🔹 <b>{name}:</b> {lnk}")
+                    
     except Exception as e:
         final_results.append(f"Error: {str(e)}")
     finally:
@@ -110,7 +142,7 @@ def run_scraper(base_url, mediator_domain, hubdrive_domain, bot_token, chat_id, 
             title = post.select_one('.movie-card-title').get_text(strip=True)
             link = post['href']
             
-            # --- FIX: Handle Relative URLs ---
+            # Handle Relative URLs
             if link.startswith('/'):
                 link = base_url.rstrip('/') + link
             
