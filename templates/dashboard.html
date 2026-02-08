@@ -1,81 +1,30 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>Bot Dashboard</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <meta http-equiv="refresh" content="5"> </head>
-<body class="bg-light">
-    <nav class="navbar navbar-dark bg-dark px-4 py-3">
-        <a class="navbar-brand"><i class="fas fa-spider"></i> 4kHDHub Bot</a>
-        <a href="/logout" class="btn btn-outline-danger btn-sm">Logout</a>
-    </nav>
-    <div class="container mt-4">
-        <div class="card mb-4 shadow-sm">
-            <div class="card-body d-flex justify-content-between align-items-center">
-                <div>
-                    <h6 class="text-muted mb-1">CURRENT STATUS</h6>
-                    <h4 class="mb-0 text-primary">
-                        {% if 'Idle' in status.current_action or 'Sleeping' in status.current_action %}
-                        <i class="fas fa-check-circle text-success"></i> {{ status.current_action }}
-                        {% else %}
-                        <i class="fas fa-circle-notch fa-spin text-warning"></i> {{ status.current_action }}
-                        {% endif %}
-                    </h4>
+<div class="card p-4 border-warning mb-4">
+    <h5><i class="fas fa-flask"></i> Manual Debugger</h5>
+    <p class="small text-muted">Paste a link to see the step-by-step logs.</p>
+    <form action="/manual-resolve" method="POST">
+        <input type="text" name="test_url" class="form-control mb-2" placeholder="https://hubdrive.space/..." required>
+        <button type="submit" class="btn btn-warning w-100"><i class="fas fa-bug"></i> Test & Trace</button>
+    </form>
+    
+    {% if manual_result %}
+    <div class="alert alert-dark mt-3 small p-3">
+        <strong>🔍 Execution Log:</strong>
+        <hr class="border-secondary">
+        <div style="max-height: 200px; overflow-y: auto; font-family: monospace;">
+            {% for line in manual_result %}
+                <div class="mb-1">
+                    {% if 'Success' in line %}
+                        <span class="text-success">{{ line }}</span>
+                    {% elif 'Error' in line or 'Failed' in line or 'WARNING' in line %}
+                        <span class="text-danger">{{ line }}</span>
+                    {% elif '===' in line %}
+                        <strong class="text-white">{{ line }}</strong>
+                    {% else %}
+                        <span class="text-muted">{{ line }}</span>
+                    {% endif %}
                 </div>
-                <div class="text-end">
-                    <span class="badge bg-secondary mb-2">CPU: {{ cpu }}%</span>
-                    <span class="badge bg-secondary mb-2">RAM: {{ ram }}%</span>
-                    <br>
-                    <a href="/run-now" class="btn btn-success"><i class="fas fa-play"></i> Force Run</a>
-                </div>
-            </div>
-        </div>
-
-        <div class="row">
-            <div class="col-lg-5">
-                <div class="card p-4 shadow-sm mb-4">
-                    <h5><i class="fas fa-cog"></i> Settings</h5>
-                    <form action="/settings" method="POST">
-                        <div class="mb-2">
-                            <label class="small">Main Site</label>
-                            <input type="text" name="main_site_url" class="form-control" value="{{ settings.main_site_url }}">
-                        </div>
-                        <div class="mb-2">
-                            <label class="small">Mediator Domain</label>
-                            <input type="text" name="mediator_domain" class="form-control" value="{{ settings.mediator_domain }}">
-                        </div>
-                        <div class="mb-2">
-                            <label class="small">HubDrive Domain</label>
-                            <input type="text" name="hubdrive_domain" class="form-control" value="{{ settings.hubdrive_domain }}">
-                        </div>
-                        <div class="mb-3">
-                            <label class="small">Interval (Mins)</label>
-                            <input type="number" name="check_interval" class="form-control" value="{{ settings.check_interval }}">
-                        </div>
-                        <button type="submit" class="btn btn-primary w-100">Save</button>
-                    </form>
-                </div>
-            </div>
-
-            <div class="col-lg-7">
-                <div class="card p-4 shadow-sm h-100">
-                    <div class="d-flex justify-content-between mb-3">
-                        <h5><i class="fas fa-history"></i> Logs</h5>
-                        <span class="badge bg-primary">Total Scraped: {{ total }}</span>
-                    </div>
-                    <div class="bg-dark rounded p-3" style="height: 400px; overflow-y: auto; font-family: monospace; font-size: 0.85rem;">
-                        {% for log in logs %}
-                        <div class="mb-1">
-                            <span class="text-secondary">[{{ log.timestamp.strftime('%H:%M:%S') }}]</span>
-                            <span class="{{ 'text-danger' if log.is_error else 'text-success' }}">{{ log.message }}</span>
-                        </div>
-                        {% endfor %}
-                    </div>
-                </div>
-            </div>
+            {% endfor %}
         </div>
     </div>
-</body>
-</html>
+    {% endif %}
+</div>
