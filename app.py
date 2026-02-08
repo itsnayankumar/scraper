@@ -9,7 +9,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 import scraper_logic
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'default_key_change_me')
+app.config['SECRET_KEY'] = os.urandom(24)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///scraper.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
@@ -18,7 +18,7 @@ login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = 'login'
 
-# --- DATABASE MODELS ---
+# --- MODELS ---
 class Settings(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     main_site_url = db.Column(db.String(100), default='https://4khdhub.dad')
@@ -53,40 +53,33 @@ def load_user(user_id):
 
 # --- HELPERS ---
 def update_status(message):
-    try:
-        with app.app_context():
-            status = BotStatus.query.first()
-            if not status: 
-                db.session.add(BotStatus())
-                db.session.commit()
-                status = BotStatus.query.first()
-            status.current_action = message
-            status.last_updated = datetime.datetime.utcnow()
-            db.session.commit()
-            print(f"[STATUS] {message}")
-    except: pass
+    with app.app_context():
+        status = BotStatus.query.first()
+        if not status: db.session.add(BotStatus()); db.session.commit(); status = BotStatus.query.first()
+        status.current_action = message
+        status.last_updated = datetime.datetime.utcnow()
+        db.session.commit()
+        print(f"[STATUS] {message}")
 
 def log_message(message, is_error=False):
-    try:
-        with app.app_context():
-            db.session.add(Logs(message=message, is_error=is_error))
-            db.session.commit()
-    except: pass
+    with app.app_context():
+        db.session.add(Logs(message=message, is_error=is_error))
+        db.session.commit()
 
 def background_job():
     with app.app_context():
-        try:
-            settings = Settings.query.first()
-            bot_token = os.environ.get('BOT_TOKEN')
-            chat_id = os.environ.get('AUTH_CHANNEL')
-            
-            if not bot_token or not chat_id:
-                log_message("Missing BOT_TOKEN or AUTH_CHANNEL env vars", True)
-                return
+        settings = Settings.query.first()
+        bot_token = os.environ.get('BOT_TOKEN')
+        chat_id = os.environ.get('AUTH_CHANNEL')
+        
+        if not bot_token or not chat_id:
+            log_message("Missing BOT_TOKEN or AUTH_CHANNEL env vars", True)
+            return
 
-            update_status("🚀 Scheduler Running...")
-            history = [h.title for h in History.query.all()]
-            
+        update_status("🚀 Starting Scheduler...")
+        history = [h.title for h in History.query.all()]
+        
+        try:
             new_items = scraper_logic.run_scraper(
                 settings.main_site_url, settings.mediator_domain, settings.hubdrive_domain,
                 bot_token, chat_id, history, update_status, log_message
@@ -98,32 +91,20 @@ def background_job():
             log_message(f"Job Failed: {e}", True)
             update_status("❌ Error")
 
-# Start Scheduler
-if not app.debug or os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(func=background_job, trigger="interval", minutes=30, id='scraper_job')
-    scheduler.start()
+scheduler = BackgroundScheduler()
+scheduler.add_job(func=background_job, trigger="interval", minutes=30, id='scraper_job')
+scheduler.start()
 
 # --- ROUTES ---
 @app.route('/')
 @login_required
 def dashboard():
-    try:
-        settings = Settings.query.first()
-        if not settings: settings = Settings()
-        
-        status = BotStatus.query.first()
-        if not status: status = BotStatus()
-
-        logs = Logs.query.order_by(Logs.timestamp.desc()).limit(50).all()
-        cpu = psutil.cpu_percent()
-        ram = psutil.virtual_memory().percent
-        total = History.query.count()
-        errors = Logs.query.filter_by(is_error=True).count()
-        
-        return render_template('dashboard.html', settings=settings, status=status, logs=logs, cpu=cpu, ram=ram, total=total, errors=errors)
-    except Exception as e:
-        return f"CRITICAL DASHBOARD ERROR: {str(e)}", 500
+    settings = Settings.query.first()
+    status = BotStatus.query.first()
+    logs = Logs.query.order_by(Logs.timestamp.desc()).limit(50).all()
+    cpu, ram = psutil.cpu_percent(), psutil.virtual_memory().percent
+    total = History.query.count()
+    return render_template('dashboard.html', settings=settings, status=status, logs=logs, cpu=cpu, ram=ram, total=total)
 
 @app.route('/settings', methods=['POST'])
 @login_required
@@ -135,49 +116,16 @@ def update_settings():
     new_interval = int(request.form.get('check_interval'))
     settings.check_interval = new_interval
     try: scheduler.reschedule_job(job_id='scraper_job', trigger='interval', minutes=new_interval)
-    except: pass
+    except: scheduler.add_job(func=background_job, trigger="interval", minutes=new_interval, id='scraper_job')
     db.session.commit()
+    flash('Settings Updated')
     return redirect(url_for('dashboard'))
-
-@app.route('/manual-resolve', methods=['POST'])
-@login_required
-def manual_resolve():
-    url = request.form.get('test_url')
-    settings = Settings.query.first()
-    manual_result = []
-    
-    if url:
-        try:
-            def trace_callback(msg): manual_result.append(msg)
-            data, trace = scraper_logic.resolve_page_data(
-                url, settings.mediator_domain, settings.hubdrive_domain, trace_callback
-            )
-            manual_result.append("=== TRACE LOG ===")
-            manual_result.extend(trace)
-            
-            if data.get('links'):
-                manual_result.append("\n=== SUCCESS: LINKS FOUND ===")
-                for l in data['links']:
-                    manual_result.append(f"{l['name']}: {l['url']}")
-            elif "error" in data:
-                manual_result.append(f"\n=== ERROR ===\n{data['error']}")
-            else:
-                manual_result.append("\n=== NO LINKS FOUND ===")
-        except Exception as e:
-            manual_result.append(f"CRITICAL ERROR: {str(e)}")
-            
-    # Re-render dashboard manually to pass manual_result
-    status = BotStatus.query.first()
-    logs = Logs.query.order_by(Logs.timestamp.desc()).limit(50).all()
-    cpu = psutil.cpu_percent()
-    ram = psutil.virtual_memory().percent
-    total = History.query.count()
-    return render_template('dashboard.html', settings=settings, status=status, logs=logs, cpu=cpu, ram=ram, total=total, manual_result=manual_result)
 
 @app.route('/run-now')
 @login_required
 def run_now():
     threading.Thread(target=background_job).start()
+    flash('Job started in background')
     return redirect(url_for('dashboard'))
 
 @app.route('/login', methods=['GET', 'POST'])
@@ -195,19 +143,12 @@ def logout(): logout_user(); return redirect(url_for('login'))
 
 if __name__ == '__main__':
     with app.app_context():
-        # --- NUCLEAR FIX: RESET DB ON STARTUP ---
-        # This deletes the old corrupted file and makes a fresh one.
-        db.drop_all()
         db.create_all()
-        
-        # Create Default Admin
-        u = os.environ.get('ADMIN_USERNAME', 'admin')
-        p = os.environ.get('ADMIN_PASSWORD', 'admin')
-        db.session.add(User(username=u, password=p))
-        db.session.add(Settings())
-        db.session.add(BotStatus())
-        db.session.commit()
-        print("DATABASE RESET AND INITIALIZED SUCCESSFULLY")
-            
+        if not User.query.first():
+            u, p = os.environ.get('ADMIN_USERNAME', 'admin'), os.environ.get('ADMIN_PASSWORD', 'admin')
+            db.session.add(User(username=u, password=p))
+            db.session.add(Settings())
+            db.session.add(BotStatus())
+            db.session.commit()
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
