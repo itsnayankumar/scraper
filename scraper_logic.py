@@ -33,7 +33,6 @@ def get_driver():
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
     return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
 
-# --- HELPER: CLICK & CLEAN (AD BUSTER) ---
 def click_and_clean(driver, element, trace):
     """Clicks element and closes any new tabs that open."""
     original_window = driver.current_window_handle
@@ -50,13 +49,12 @@ def click_and_clean(driver, element, trace):
                     driver.close()
             driver.switch_to.window(original_window)
             trace.append("      -> Popups closed. Refocused main tab.")
-            return False # Click was likely consumed by ad
-        return True # Click seemed successful
+            return False 
+        return True 
     except Exception as e:
         trace.append(f"      -> Click failed: {str(e)}")
         return False
 
-# --- HELPER: 10GBPS RESOLVER ---
 def resolve_10gbps_link(driver, link, trace):
     trace.append(f"    > Resolving 10Gbps link: {link}")
     original_window = driver.current_window_handle
@@ -80,10 +78,8 @@ def resolve_10gbps_link(driver, link, trace):
         except: pass
         return link 
 
-# --- MAIN PAGE RESOLVER ---
 def resolve_page_data(initial_link, mediator_domain, hubdrive_domain, status_callback):
     driver = get_driver()
-    # TRACE LOG: We will store every step here to show you exactly what happened
     trace = [] 
     data = { "filename": "Unknown Title", "size": "N/A", "links": [] }
     
@@ -93,7 +89,6 @@ def resolve_page_data(initial_link, mediator_domain, hubdrive_domain, status_cal
         driver.get(initial_link)
         wait = WebDriverWait(driver, 30)
         
-        # --- PHASE 1: HUBDRIVE ---
         if hubdrive_domain in driver.current_url or "HubDrive" in driver.title:
             trace.append("Detected HubDrive.")
             status_callback("HubDrive found...")
@@ -105,12 +100,10 @@ def resolve_page_data(initial_link, mediator_domain, hubdrive_domain, status_cal
             except Exception as e:
                 trace.append(f"HubDrive Error: {e}")
 
-        # --- PHASE 2: MEDIATOR ---
         if mediator_domain in driver.current_url or "Mediator" in driver.title:
             trace.append("Detected Mediator Page.")
             status_callback("Mediator found. Waiting for Timer...")
             
-            # Wait for "Continue" button
             try:
                 xpath = "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'continue')] | //a[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'continue')]"
                 trace.append("Waiting for 'Continue' button to be clickable...")
@@ -120,21 +113,18 @@ def resolve_page_data(initial_link, mediator_domain, hubdrive_domain, status_cal
                 
                 status_callback("Timer done. Clicking...")
                 
-                # AD-BUSTING LOOP
                 clicked_through = False
                 for i in range(1, 4):
                     trace.append(f"Attempt {i}: Clicking Continue Button...")
                     driver.execute_script("arguments[0].click();", continue_btn)
                     time.sleep(2)
                     
-                    # Check for popups
                     if len(driver.window_handles) > 1:
                         trace.append(f"  > Popup detected! Closing it.")
                         driver.switch_to.window(driver.window_handles[1])
                         driver.close()
                         driver.switch_to.window(driver.window_handles[0])
                     
-                    # Check URL
                     curr_url = driver.current_url
                     trace.append(f"  > Current URL: {curr_url}")
                     
@@ -151,12 +141,21 @@ def resolve_page_data(initial_link, mediator_domain, hubdrive_domain, status_cal
             except Exception as e:
                 trace.append(f"Mediator Error: {e}")
 
-        # --- PHASE 3: HUBCLOUD ---
         if "hubcloud" in driver.current_url or "drive" in driver.current_url:
             trace.append("Landed on HubCloud.")
             status_callback("HubCloud found. Extracting...")
             
             try:
+                try:
+                    size_elem = driver.find_element(By.XPATH, "//td[contains(text(), 'File Size')]/following-sibling::td")
+                    data["size"] = size_elem.text.strip()
+                except: pass
+
+                try:
+                    name_elem = driver.find_element(By.CLASS_NAME, "card-header")
+                    data["filename"] = name_elem.text.strip()
+                except: pass
+
                 generate_btn = wait.until(EC.presence_of_element_located((By.ID, "download")))
                 trace.append("Found Generate Button. Clicking...")
                 driver.execute_script("arguments[0].click();", generate_btn)
@@ -186,12 +185,9 @@ def resolve_page_data(initial_link, mediator_domain, hubdrive_domain, status_cal
     finally:
         driver.quit()
         
-    # Return both Data AND the Debug Trace
     return data, trace
 
-# --- FORMATTER ---
 def format_message(data):
-    # (Same as before)
     msg = f"<b>┎ 📚 Title :-</b> <code>{data['filename']}</code>\n<b>┃</b>\n<b>┠ 💾 Size :-</b> {data['size']}\n<b>┃</b>\n"
     for i, link in enumerate(data['links']):
         prefix = "┖" if i == len(data['links']) - 1 else "┠"
@@ -200,33 +196,12 @@ def format_message(data):
     msg += f"\n━━━━━━━✦✗✦━━━━━━━\n\n<b>Requested By :-</b> {REQUESTED_BY}"
     return msg
 
-# --- MANUAL RESOLVER FOR WEB DASHBOARD ---
-# This is what app.py calls for the "Manual" tool
-def resolve_all_mirrors_verbose(url, mediator, hubdrive):
-    # Wrapper to use the same logic but return just the trace for the UI
-    data, trace = resolve_page_data(url, mediator, hubdrive, lambda x: None)
-    
-    # Format the results for the dashboard
-    final_output = []
-    final_output.append("=== DEBUG TRACE ===")
-    final_output.extend(trace)
-    
-    if data['links']:
-        final_output.append("\n=== LINKS FOUND ===")
-        for l in data['links']:
-            final_output.append(f"{l['name']}: {l['url']}")
-    else:
-        final_output.append("\n=== NO LINKS FOUND ===")
-    
-    return final_output
-
-# --- SCHEDULER ENTRY POINT ---
 def run_scraper(base_url, mediator_domain, hubdrive_domain, bot_token, chat_id, seen_history, status_callback, log_callback):
     new_items = []
     try:
-        # (Standard logic setup...)
+        status_callback(f"Scanning Homepage: {base_url}")
         headers = {'User-Agent': 'Mozilla/5.0'}
-        resp = requests.get(base_url, headers=headers)
+        resp = requests.get(base_url, headers=headers, timeout=20)
         soup = BeautifulSoup(resp.text, 'html.parser')
         posts = soup.select('.latest-releases .movie-card')
 
@@ -236,20 +211,16 @@ def run_scraper(base_url, mediator_domain, hubdrive_domain, bot_token, chat_id, 
             if link.startswith('/'): link = base_url.rstrip('/') + link
             if title in seen_history: continue
             
-            # CALL THE RESOLVER AND GET THE TRACE
-            # We ignore the trace in automatic mode, unless it fails
             page_data, trace = resolve_page_data(link, mediator_domain, hubdrive_domain, status_callback)
             
             if page_data["links"]:
                 if page_data["filename"] == "Unknown Title":
-                   # Try to recover title from homepage
                    page_data["filename"] = title
                 
                 send_telegram(bot_token, chat_id, format_message(page_data))
                 new_items.append(title)
                 log_callback(f"Sent: {title}")
             else:
-                # Log the last 3 steps of trace if it failed
                 failure_reason = " | ".join(trace[-3:])
                 log_callback(f"Failed {title}: {failure_reason}")
                 
