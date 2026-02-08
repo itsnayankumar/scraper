@@ -8,6 +8,7 @@ from flask_login import LoginManager, UserMixin, login_user, login_required, log
 from apscheduler.schedulers.background import BackgroundScheduler
 import scraper_logic
 
+# --- CRITICAL INITIALIZATION ---
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.urandom(24)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///scraper.db'
@@ -83,6 +84,7 @@ def background_job():
         history = [h.title for h in History.query.all()]
         
         try:
+            # Pass our helper functions to the scraper
             new_items = scraper_logic.run_scraper(
                 settings.main_site_url, settings.mediator_domain, settings.hubdrive_domain,
                 bot_token, chat_id, history, update_status, log_message
@@ -94,7 +96,7 @@ def background_job():
             log_message(f"Job Failed: {e}", True)
             update_status("❌ Error")
 
-# Start Scheduler
+# Start Scheduler only if not in debug mode to prevent duplicates
 if not app.debug or os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
     scheduler = BackgroundScheduler()
     scheduler.add_job(func=background_job, trigger="interval", minutes=30, id='scraper_job')
@@ -142,19 +144,23 @@ def manual_resolve():
     manual_result = []
     if url:
         try:
-            # We use a dummy lambda for status updates since we just want the trace
+            # Helper lambda to capture trace updates without writing to DB
+            def trace_callback(msg):
+                manual_result.append(msg)
+
             data, trace = scraper_logic.resolve_page_data(
                 url, 
                 settings.mediator_domain, 
                 settings.hubdrive_domain, 
-                lambda x: None
+                trace_callback
             )
             
-            manual_result.append("=== DEBUG TRACE ===")
+            # Append detailed trace
+            manual_result.append("=== TRACE LOG ===")
             manual_result.extend(trace)
             
             if data['links']:
-                manual_result.append("\n=== LINKS FOUND ===")
+                manual_result.append("\n=== SUCCESS: LINKS FOUND ===")
                 for l in data['links']:
                     manual_result.append(f"{l['name']}: {l['url']}")
             elif "error" in data:
@@ -165,7 +171,7 @@ def manual_resolve():
         except Exception as e:
             manual_result.append(f"CRITICAL ERROR: {str(e)}")
             
-    # Re-render dashboard with results
+    # Re-render dashboard
     status = BotStatus.query.first()
     logs = Logs.query.order_by(Logs.timestamp.desc()).limit(50).all()
     cpu, ram = psutil.cpu_percent(), psutil.virtual_memory().percent
