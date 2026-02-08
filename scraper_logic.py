@@ -10,8 +10,9 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
 # --- CONFIGURATION ---
-REQUESTED_BY = "HDHub Bot 🤖"  # Change this to whatever you want
+REQUESTED_BY = "HDHub Bot 🤖"
 
+# --- TELEGRAM SENDER ---
 def send_telegram(token, chat_id, message):
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {
@@ -23,6 +24,7 @@ def send_telegram(token, chat_id, message):
     try: requests.post(url, data=payload)
     except Exception as e: print(f"Telegram Error: {e}")
 
+# --- BROWSER SETUP ---
 def get_driver():
     chrome_options = Options()
     chrome_options.add_argument("--headless") 
@@ -32,6 +34,7 @@ def get_driver():
     chrome_options.add_argument("--window-size=1920,1080")
     return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
 
+# --- HELPER: 10GBPS RESOLVER ---
 def resolve_10gbps_link(driver, link, status_callback):
     status_callback("    > Resolving 10Gbps link...")
     original_window = driver.current_window_handle
@@ -39,6 +42,7 @@ def resolve_10gbps_link(driver, link, status_callback):
         driver.switch_to.new_window('tab')
         driver.get(link)
         wait = WebDriverWait(driver, 30)
+        # Wait for "Download Here" button
         btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//a[contains(text(), 'Download Here')] | //button[contains(text(), 'Download Here')]")))
         final_link = btn.get_attribute('href')
         driver.close()
@@ -49,6 +53,7 @@ def resolve_10gbps_link(driver, link, status_callback):
         except: pass
         return link 
 
+# --- MAIN PAGE RESOLVER ---
 def resolve_page_data(initial_link, mediator_domain, hubdrive_domain, status_callback):
     driver = get_driver()
     data = {
@@ -66,7 +71,7 @@ def resolve_page_data(initial_link, mediator_domain, hubdrive_domain, status_cal
         if hubdrive_domain in driver.current_url or "HubDrive" in driver.title:
             status_callback("  > HubDrive found. Redirecting...")
             try:
-                # Try to scrape size from HubDrive first if available
+                # Try to grab size from HubDrive page if possible
                 try:
                     size_elem = driver.find_element(By.XPATH, "//td[contains(text(), 'File Size')]/following-sibling::td")
                     data["size"] = size_elem.text.strip()
@@ -79,6 +84,7 @@ def resolve_page_data(initial_link, mediator_domain, hubdrive_domain, status_cal
         # --- MEDIATOR PHASE ---
         if mediator_domain in driver.current_url or "Mediator" in driver.title:
             status_callback("  > Mediator found. Waiting for Timer...")
+            # Wait for "Please Wait" -> "Continue"
             continue_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'CLICK TO CONTINUE')] | //a[contains(text(), 'CLICK TO CONTINUE')]")))
             time.sleep(1)
             driver.execute_script("arguments[0].click();", continue_btn)
@@ -86,22 +92,20 @@ def resolve_page_data(initial_link, mediator_domain, hubdrive_domain, status_cal
 
         # --- HUBCLOUD PHASE ---
         if "hubcloud" in driver.current_url or "drive" in driver.current_url:
-            status_callback("  > HubCloud found. extracting info...")
+            status_callback("  > HubCloud found. Extracting info...")
             
-            # 1. Scrape Filename & Size (If not already found)
+            # 1. Scrape Info
             try:
-                # HubCloud usually has a table row with "File Size"
                 if data["size"] == "N/A":
                     size_elem = driver.find_element(By.XPATH, "//td[contains(text(), 'File Size')]/following-sibling::td")
                     data["size"] = size_elem.text.strip()
                 
-                # Filename is often in an h5 or card header
+                # Filename usually in the card header
                 name_elem = driver.find_element(By.CLASS_NAME, "card-header")
                 data["filename"] = name_elem.text.strip()
-            except: 
-                pass # Keep default values if scraping fails
+            except: pass
 
-            # 2. Click Generate
+            # 2. Generate Links
             generate_btn = wait.until(EC.element_to_be_clickable((By.ID, "download")))
             driver.execute_script("arguments[0].click();", generate_btn)
             
@@ -128,34 +132,38 @@ def resolve_page_data(initial_link, mediator_domain, hubdrive_domain, status_cal
         
     return data
 
+# --- MESSAGE FORMATTER ---
 def format_message(data):
-    # Determine icon based on resolution/quality in filename
     title = data["filename"]
+    size = data["size"]
+    links = data["links"]
     
+    # Header
     msg = f"<b>┎ 📚 Title :-</b> <code>{title}</code>\n"
     msg += "<b>┃</b>\n"
-    msg += f"<b>┠ 💾 Size :-</b> {data['size']}\n"
+    msg += f"<b>┠ 💾 Size :-</b> {size}\n"
     msg += "<b>┃</b>\n"
     
-    links = data["links"]
+    # Links
     total_links = len(links)
-    
     for i, link in enumerate(links):
         is_last = (i == total_links - 1)
         prefix = "┖" if is_last else "┠"
-        
-        # Add special emoji for certain servers
         server_name = link['name']
         
+        # Link Format: "┠ 🔗 FSL Server :- Link"
         msg += f"<b>{prefix} 🔗 {server_name} :-</b> <a href='{link['url']}'>Link</a>\n"
+        
         if not is_last:
             msg += "<b>┃</b>\n"
 
+    # Footer
     msg += "\n━━━━━━━✦✗✦━━━━━━━\n\n"
     msg += f"<b>Requested By :-</b> {REQUESTED_BY}"
     
     return msg
 
+# --- MAIN SCRAPER LOGIC ---
 def run_scraper(base_url, mediator_domain, hubdrive_domain, bot_token, chat_id, seen_history, status_callback, log_callback):
     new_items = []
     
@@ -166,10 +174,16 @@ def run_scraper(base_url, mediator_domain, hubdrive_domain, bot_token, chat_id, 
         soup = BeautifulSoup(resp.text, 'html.parser')
         posts = soup.select('.latest-releases .movie-card')
 
+        # Limit to top 2 posts per run to prevent timeout
         for post in posts[:2]: 
             title = post.select_one('.movie-card-title').get_text(strip=True)
             link = post['href']
             
+            # --- FIX: Handle Relative URLs ---
+            if link.startswith('/'):
+                link = base_url.rstrip('/') + link
+            # ---------------------------------
+
             if title in seen_history: continue
             
             log_callback(f"Found new post: {title}")
@@ -181,17 +195,19 @@ def run_scraper(base_url, mediator_domain, hubdrive_domain, bot_token, chat_id, 
             
             found_ep = False
             for box in boxes:
-                # We scrape the HubCloud link to get the FULL details (Size, Real Filename, Mirrors)
+                # Find Buttons inside the box
                 buttons = box.select('a.btn')
                 for btn in buttons:
                     b_text = btn.get_text(strip=True).lower()
+                    
+                    # If we find a HubCloud or HubDrive link
                     if 'hubcloud' in b_text or 'hubdrive' in b_text:
                         
-                        # Resolve EVERYTHING (Size, Name, Links)
+                        # Resolve Full Data (Size, Name, Links)
                         page_data = resolve_page_data(btn.get('href'), mediator_domain, hubdrive_domain, status_callback)
                         
                         if page_data["links"]:
-                            # If scraping filename failed, fall back to the one on the 4kHDHub page
+                            # Fallback if filename wasn't found on the cloud page
                             if page_data["filename"] == "Unknown Title":
                                 fname_tag = box.select_one('code, .episode-file-title')
                                 if fname_tag: page_data["filename"] = fname_tag.get_text(strip=True)
@@ -202,9 +218,9 @@ def run_scraper(base_url, mediator_domain, hubdrive_domain, bot_token, chat_id, 
             
             if found_ep:
                 new_items.append(title)
-                log_callback(f"Sent: {title}")
+                log_callback(f"Sent to Telegram: {title}")
             else:
-                log_callback(f"Skipped {title} (No links)")
+                log_callback(f"Skipped {title} (No valid links)")
                 
     except Exception as e:
         log_callback(f"Critical Error: {str(e)}", True)
