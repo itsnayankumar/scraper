@@ -12,19 +12,14 @@ from selenium.webdriver.support import expected_conditions as EC
 # --- CONFIGURATION ---
 REQUESTED_BY = "HDHub Bot 🤖"
 
-# --- TELEGRAM SENDER ---
 def send_telegram(token, chat_id, message):
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {
-        'chat_id': chat_id, 
-        'text': message, 
-        'parse_mode': 'HTML', 
-        'disable_web_page_preview': True
+        'chat_id': chat_id, 'text': message, 'parse_mode': 'HTML', 'disable_web_page_preview': True
     }
     try: requests.post(url, data=payload, timeout=10)
     except Exception as e: print(f"Telegram Error: {e}")
 
-# --- BROWSER SETUP ---
 def get_driver():
     chrome_options = Options()
     chrome_options.add_argument("--headless") 
@@ -32,64 +27,51 @@ def get_driver():
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
-    
-    # Anti-Bot Detection Features
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option('useAutomationExtension', False)
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-
     return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
 
-# --- HELPER: HANDLE ADS & POPUPS ---
-def click_and_clean(driver, element):
-    """Clicks an element and closes any ad tabs that open."""
+# --- HELPER: CLICK & CLEAN (AD BUSTER) ---
+def click_and_clean(driver, element, trace):
+    """Clicks element and closes any new tabs that open."""
     original_window = driver.current_window_handle
-    
-    # 1. Attempt Click
     try:
         driver.execute_script("arguments[0].click();", element)
-        time.sleep(2) # Wait for potential ad to trigger
-    except:
+        trace.append("      -> Clicked element via JS.")
+        time.sleep(2)
+        
+        if len(driver.window_handles) > 1:
+            trace.append(f"      -> Detected {len(driver.window_handles)} tabs. Closing popups...")
+            for window in driver.window_handles:
+                if window != original_window:
+                    driver.switch_to.window(window)
+                    driver.close()
+            driver.switch_to.window(original_window)
+            trace.append("      -> Popups closed. Refocused main tab.")
+            return False # Click was likely consumed by ad
+        return True # Click seemed successful
+    except Exception as e:
+        trace.append(f"      -> Click failed: {str(e)}")
         return False
 
-    # 2. Check for new tabs (Pop-ups)
-    if len(driver.window_handles) > 1:
-        for window in driver.window_handles:
-            if window != original_window:
-                driver.switch_to.window(window)
-                driver.close()
-        driver.switch_to.window(original_window)
-        return False # Click was consumed by ad, need to retry
-
-    # 3. Check if we were redirected to a bogus URL in the same tab
-    # (Simple check: if URL is very long or suspicious, we go back)
-    # For now, we assume if we are still on the same domain, it failed
-    return True
-
 # --- HELPER: 10GBPS RESOLVER ---
-def resolve_10gbps_link(driver, link, status_callback):
-    status_callback("    > Resolving 10Gbps link...")
+def resolve_10gbps_link(driver, link, trace):
+    trace.append(f"    > Resolving 10Gbps link: {link}")
     original_window = driver.current_window_handle
     try:
         driver.switch_to.new_window('tab')
         driver.get(link)
         wait = WebDriverWait(driver, 30)
-        
-        # Click "Download Here" with Ad-Busting
         btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//a[contains(text(), 'Download Here')] | //button[contains(text(), 'Download Here')]")))
         
-        # Try up to 3 times
-        for _ in range(3):
-            click_and_clean(driver, btn)
-            if "drive" in driver.current_url or "google" in driver.current_url or "mega" in driver.current_url:
-                break # Success
+        for i in range(3):
+            if click_and_clean(driver, btn, trace):
+                if "drive" in driver.current_url or "google" in driver.current_url:
+                    break
         
         final_link = driver.current_url
-        # If still on the button page, try grabbing href directly
-        if final_link == link:
-            final_link = btn.get_attribute('href')
-
         driver.close()
         driver.switch_to.window(original_window)
         return final_link
@@ -101,187 +83,176 @@ def resolve_10gbps_link(driver, link, status_callback):
 # --- MAIN PAGE RESOLVER ---
 def resolve_page_data(initial_link, mediator_domain, hubdrive_domain, status_callback):
     driver = get_driver()
-    data = {
-        "filename": "Unknown Title",
-        "size": "N/A",
-        "links": []
-    }
+    # TRACE LOG: We will store every step here to show you exactly what happened
+    trace = [] 
+    data = { "filename": "Unknown Title", "size": "N/A", "links": [] }
     
     try:
-        status_callback(f"  > Opening Link...")
+        trace.append(f"Opening Link: {initial_link}")
+        status_callback(f"Opening Link...")
         driver.get(initial_link)
         wait = WebDriverWait(driver, 30)
         
         # --- PHASE 1: HUBDRIVE ---
         if hubdrive_domain in driver.current_url or "HubDrive" in driver.title:
-            status_callback("  > HubDrive found. Clicking HubCloud...")
+            trace.append("Detected HubDrive.")
+            status_callback("HubDrive found...")
             try:
-                # Scrape Size
-                try:
-                    size_elem = driver.find_element(By.XPATH, "//td[contains(text(), 'File Size')]/following-sibling::td")
-                    data["size"] = size_elem.text.strip()
-                except: pass
-                
-                # Click HubCloud Server
                 hubcloud_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//a[contains(text(), 'HubCloud Server')]")))
-                driver.get(hubcloud_btn.get_attribute('href'))
-            except: pass
+                link = hubcloud_btn.get_attribute('href')
+                trace.append(f"Found HubCloud button. Redirecting to: {link}")
+                driver.get(link)
+            except Exception as e:
+                trace.append(f"HubDrive Error: {e}")
 
-        # --- PHASE 2: MEDIATOR (AD BUSTER ADDED) ---
+        # --- PHASE 2: MEDIATOR ---
         if mediator_domain in driver.current_url or "Mediator" in driver.title:
-            status_callback("  > Mediator found. Waiting for Timer...")
+            trace.append("Detected Mediator Page.")
+            status_callback("Mediator found. Waiting for Timer...")
             
-            # Wait for "Continue"
-            xpath = "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'continue')] | //a[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'continue')]"
-            continue_btn = wait.until(EC.element_to_be_clickable((By.XPATH, xpath)))
-            time.sleep(1.5) # Let JS settle
-            
-            status_callback("  > Timer done. Clicking (Anti-Ad Mode)...")
-            
-            # Try clicking up to 3 times to kill ads
-            for i in range(3):
-                # Check if we moved on
-                if "hubcloud" in driver.current_url or "drive" in driver.current_url:
-                    break
+            # Wait for "Continue" button
+            try:
+                xpath = "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'continue')] | //a[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'continue')]"
+                trace.append("Waiting for 'Continue' button to be clickable...")
+                continue_btn = wait.until(EC.element_to_be_clickable((By.XPATH, xpath)))
+                trace.append("Button became clickable. Waiting 1.5s for JS...")
+                time.sleep(1.5)
                 
-                # Perform Click & Clean
-                driver.execute_script("arguments[0].click();", continue_btn)
-                time.sleep(2)
+                status_callback("Timer done. Clicking...")
                 
-                # Handle New Tab Ads
-                if len(driver.window_handles) > 1:
-                    driver.switch_to.window(driver.window_handles[1])
-                    driver.close()
-                    driver.switch_to.window(driver.window_handles[0])
-                    status_callback(f"  > Ad Tab Closed. Retrying click {i+2}...")
-
-            # Final Wait
-            wait.until(lambda d: "hubcloud" in d.current_url or "drive" in d.current_url)
+                # AD-BUSTING LOOP
+                clicked_through = False
+                for i in range(1, 4):
+                    trace.append(f"Attempt {i}: Clicking Continue Button...")
+                    driver.execute_script("arguments[0].click();", continue_btn)
+                    time.sleep(2)
+                    
+                    # Check for popups
+                    if len(driver.window_handles) > 1:
+                        trace.append(f"  > Popup detected! Closing it.")
+                        driver.switch_to.window(driver.window_handles[1])
+                        driver.close()
+                        driver.switch_to.window(driver.window_handles[0])
+                    
+                    # Check URL
+                    curr_url = driver.current_url
+                    trace.append(f"  > Current URL: {curr_url}")
+                    
+                    if "hubcloud" in curr_url or "drive" in curr_url:
+                        trace.append("  > Success! Redirected to HubCloud.")
+                        clicked_through = True
+                        break
+                    else:
+                        trace.append("  > Still on Mediator. Retrying...")
+                
+                if not clicked_through:
+                    trace.append("WARNING: Failed to pass Mediator after 3 clicks.")
+            
+            except Exception as e:
+                trace.append(f"Mediator Error: {e}")
 
         # --- PHASE 3: HUBCLOUD ---
         if "hubcloud" in driver.current_url or "drive" in driver.current_url:
-            status_callback("  > HubCloud found. Generating...")
+            trace.append("Landed on HubCloud.")
+            status_callback("HubCloud found. Extracting...")
             
-            # Scrape Info if missing
             try:
-                if data["size"] == "N/A":
-                    size_elem = driver.find_element(By.XPATH, "//td[contains(text(), 'File Size')]/following-sibling::td")
-                    data["size"] = size_elem.text.strip()
-                name_elem = driver.find_element(By.CLASS_NAME, "card-header")
-                data["filename"] = name_elem.text.strip()
-            except: pass
-
-            # Click Generate (Ad-Buster)
-            generate_btn = wait.until(EC.presence_of_element_located((By.ID, "download")))
-            
-            # Try clicking up to 2 times
-            for _ in range(2):
+                generate_btn = wait.until(EC.presence_of_element_located((By.ID, "download")))
+                trace.append("Found Generate Button. Clicking...")
                 driver.execute_script("arguments[0].click();", generate_btn)
-                time.sleep(1)
-                if len(driver.window_handles) > 1:
-                    driver.switch_to.window(driver.window_handles[1])
-                    driver.close()
-                    driver.switch_to.window(driver.window_handles[0])
                 
-                # Check if server list appeared
-                if len(driver.find_elements(By.XPATH, "//a[contains(., 'Download [')]")) > 0:
-                    break
-
-            status_callback("  > Extracting mirrors...")
-            buttons = driver.find_elements(By.XPATH, "//a[contains(., 'Download [')]")
-            
-            for btn in buttons:
-                txt = btn.text
-                lnk = btn.get_attribute('href')
-                name = txt.replace("Download", "").replace("[", "").replace("]", "").strip()
+                trace.append("Waiting for server list...")
+                wait.until(EC.presence_of_element_located((By.XPATH, "//a[contains(., 'Download [')]")))
                 
-                if "10gbps" in txt.lower():
-                    res_lnk = resolve_10gbps_link(driver, lnk, status_callback)
-                    data["links"].append({"name": name, "url": res_lnk})
-                else:
-                    data["links"].append({"name": name, "url": lnk})
+                buttons = driver.find_elements(By.XPATH, "//a[contains(., 'Download [')]")
+                trace.append(f"Found {len(buttons)} server buttons.")
+                
+                for btn in buttons:
+                    txt = btn.text
+                    lnk = btn.get_attribute('href')
+                    name = txt.replace("Download", "").replace("[", "").replace("]", "").strip()
                     
+                    if "10gbps" in txt.lower():
+                        res_lnk = resolve_10gbps_link(driver, lnk, trace)
+                        data["links"].append({"name": name, "url": res_lnk})
+                    else:
+                        data["links"].append({"name": name, "url": lnk})
+            except Exception as e:
+                trace.append(f"HubCloud Error: {e}")
+
     except Exception as e:
+        trace.append(f"CRITICAL FAILURE: {str(e)}")
         data["error"] = str(e)
     finally:
         driver.quit()
         
-    return data
+    # Return both Data AND the Debug Trace
+    return data, trace
 
-# --- MESSAGE FORMATTER ---
+# --- FORMATTER ---
 def format_message(data):
-    title = data["filename"]
-    size = data["size"]
-    links = data["links"]
-    
-    msg = f"<b>┎ 📚 Title :-</b> <code>{title}</code>\n"
-    msg += "<b>┃</b>\n"
-    msg += f"<b>┠ 💾 Size :-</b> {size}\n"
-    msg += "<b>┃</b>\n"
-    
-    total_links = len(links)
-    for i, link in enumerate(links):
-        is_last = (i == total_links - 1)
-        prefix = "┖" if is_last else "┠"
+    # (Same as before)
+    msg = f"<b>┎ 📚 Title :-</b> <code>{data['filename']}</code>\n<b>┃</b>\n<b>┠ 💾 Size :-</b> {data['size']}\n<b>┃</b>\n"
+    for i, link in enumerate(data['links']):
+        prefix = "┖" if i == len(data['links']) - 1 else "┠"
         msg += f"<b>{prefix} 🔗 {link['name']} :-</b> <a href='{link['url']}'>Link</a>\n"
-        if not is_last: msg += "<b>┃</b>\n"
-
-    msg += "\n━━━━━━━✦✗✦━━━━━━━\n\n"
-    msg += f"<b>Requested By :-</b> {REQUESTED_BY}"
+        if prefix == "┠": msg += "<b>┃</b>\n"
+    msg += f"\n━━━━━━━✦✗✦━━━━━━━\n\n<b>Requested By :-</b> {REQUESTED_BY}"
     return msg
 
-# --- MAIN SCRAPER ---
+# --- MANUAL RESOLVER FOR WEB DASHBOARD ---
+# This is what app.py calls for the "Manual" tool
+def resolve_all_mirrors_verbose(url, mediator, hubdrive):
+    # Wrapper to use the same logic but return just the trace for the UI
+    data, trace = resolve_page_data(url, mediator, hubdrive, lambda x: None)
+    
+    # Format the results for the dashboard
+    final_output = []
+    final_output.append("=== DEBUG TRACE ===")
+    final_output.extend(trace)
+    
+    if data['links']:
+        final_output.append("\n=== LINKS FOUND ===")
+        for l in data['links']:
+            final_output.append(f"{l['name']}: {l['url']}")
+    else:
+        final_output.append("\n=== NO LINKS FOUND ===")
+    
+    return final_output
+
+# --- SCHEDULER ENTRY POINT ---
 def run_scraper(base_url, mediator_domain, hubdrive_domain, bot_token, chat_id, seen_history, status_callback, log_callback):
     new_items = []
-    
     try:
-        status_callback(f"Scanning Homepage: {base_url}")
+        # (Standard logic setup...)
         headers = {'User-Agent': 'Mozilla/5.0'}
-        resp = requests.get(base_url, headers=headers, timeout=20)
+        resp = requests.get(base_url, headers=headers)
         soup = BeautifulSoup(resp.text, 'html.parser')
         posts = soup.select('.latest-releases .movie-card')
 
         for post in posts[:2]: 
-            title_tag = post.select_one('.movie-card-title')
-            if not title_tag: continue
-            title = title_tag.get_text(strip=True)
+            title = post.select_one('.movie-card-title').get_text(strip=True)
             link = post['href']
-            
             if link.startswith('/'): link = base_url.rstrip('/') + link
             if title in seen_history: continue
             
-            log_callback(f"Found new post: {title}")
-            status_callback(f"Processing: {title}")
+            # CALL THE RESOLVER AND GET THE TRACE
+            # We ignore the trace in automatic mode, unless it fails
+            page_data, trace = resolve_page_data(link, mediator_domain, hubdrive_domain, status_callback)
             
-            p_resp = requests.get(link, headers=headers, timeout=20)
-            p_soup = BeautifulSoup(p_resp.text, 'html.parser')
-            boxes = p_soup.select('.episode-content, .season-content, .download-item')
-            
-            found_ep = False
-            for box in boxes:
-                buttons = box.select('a.btn')
-                for btn in buttons:
-                    b_text = btn.get_text(strip=True).lower()
-                    if 'hubcloud' in b_text or 'hubdrive' in b_text:
-                        
-                        page_data = resolve_page_data(btn.get('href'), mediator_domain, hubdrive_domain, status_callback)
-                        
-                        if page_data["links"]:
-                            if page_data["filename"] == "Unknown Title":
-                                fname_tag = box.select_one('code, .episode-file-title')
-                                if fname_tag: page_data["filename"] = fname_tag.get_text(strip=True)
-
-                            final_msg = format_message(page_data)
-                            send_telegram(bot_token, chat_id, final_msg)
-                            found_ep = True
-            
-            if found_ep:
+            if page_data["links"]:
+                if page_data["filename"] == "Unknown Title":
+                   # Try to recover title from homepage
+                   page_data["filename"] = title
+                
+                send_telegram(bot_token, chat_id, format_message(page_data))
                 new_items.append(title)
                 log_callback(f"Sent: {title}")
             else:
-                log_callback(f"Skipped {title} (No links)")
+                # Log the last 3 steps of trace if it failed
+                failure_reason = " | ".join(trace[-3:])
+                log_callback(f"Failed {title}: {failure_reason}")
                 
     except Exception as e:
         log_callback(f"Critical Error: {str(e)}", True)
-        
     return new_items
