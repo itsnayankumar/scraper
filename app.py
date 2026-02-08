@@ -8,7 +8,6 @@ from flask_login import LoginManager, UserMixin, login_user, login_required, log
 from apscheduler.schedulers.background import BackgroundScheduler
 import scraper_logic
 
-# --- APP CONFIG ---
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'default_key_change_me')
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///scraper.db'
@@ -76,18 +75,18 @@ def log_message(message, is_error=False):
 
 def background_job():
     with app.app_context():
-        settings = Settings.query.first()
-        bot_token = os.environ.get('BOT_TOKEN')
-        chat_id = os.environ.get('AUTH_CHANNEL')
-        
-        if not bot_token or not chat_id:
-            log_message("Missing BOT_TOKEN or AUTH_CHANNEL env vars", True)
-            return
-
-        update_status("🚀 Scheduler Running...")
-        history = [h.title for h in History.query.all()]
-        
         try:
+            settings = Settings.query.first()
+            bot_token = os.environ.get('BOT_TOKEN')
+            chat_id = os.environ.get('AUTH_CHANNEL')
+            
+            if not bot_token or not chat_id:
+                log_message("Missing BOT_TOKEN or AUTH_CHANNEL env vars", True)
+                return
+
+            update_status("🚀 Scheduler Running...")
+            history = [h.title for h in History.query.all()]
+            
             new_items = scraper_logic.run_scraper(
                 settings.main_site_url, settings.mediator_domain, settings.hubdrive_domain,
                 bot_token, chat_id, history, update_status, log_message
@@ -99,6 +98,7 @@ def background_job():
             log_message(f"Job Failed: {e}", True)
             update_status("❌ Error")
 
+# Start Scheduler
 if not app.debug or os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
     scheduler = BackgroundScheduler()
     scheduler.add_job(func=background_job, trigger="interval", minutes=30, id='scraper_job')
@@ -109,14 +109,11 @@ if not app.debug or os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
 @login_required
 def dashboard():
     try:
-        # DEFENSIVE CODING: Handle None types gracefully
         settings = Settings.query.first()
-        if not settings:
-            settings = Settings() # Create dummy to prevent crash
-            
+        if not settings: settings = Settings()
+        
         status = BotStatus.query.first()
-        if not status:
-            status = BotStatus()
+        if not status: status = BotStatus()
 
         logs = Logs.query.order_by(Logs.timestamp.desc()).limit(50).all()
         cpu = psutil.cpu_percent()
@@ -151,14 +148,10 @@ def manual_resolve():
     
     if url:
         try:
-            # Simple wrapper to capture trace logs
-            trace_log = []
-            def trace_callback(msg): trace_log.append(msg)
-
+            def trace_callback(msg): manual_result.append(msg)
             data, trace = scraper_logic.resolve_page_data(
                 url, settings.mediator_domain, settings.hubdrive_domain, trace_callback
             )
-            
             manual_result.append("=== TRACE LOG ===")
             manual_result.extend(trace)
             
@@ -170,18 +163,15 @@ def manual_resolve():
                 manual_result.append(f"\n=== ERROR ===\n{data['error']}")
             else:
                 manual_result.append("\n=== NO LINKS FOUND ===")
-                
         except Exception as e:
             manual_result.append(f"CRITICAL ERROR: {str(e)}")
             
     # Re-render dashboard manually to pass manual_result
-    # This copies the dashboard logic to prevent context loss
     status = BotStatus.query.first()
     logs = Logs.query.order_by(Logs.timestamp.desc()).limit(50).all()
     cpu = psutil.cpu_percent()
     ram = psutil.virtual_memory().percent
     total = History.query.count()
-    
     return render_template('dashboard.html', settings=settings, status=status, logs=logs, cpu=cpu, ram=ram, total=total, manual_result=manual_result)
 
 @app.route('/run-now')
@@ -205,9 +195,8 @@ def logout(): logout_user(); return redirect(url_for('login'))
 
 if __name__ == '__main__':
     with app.app_context():
-        # --- NUCLEAR OPTION: RESET DB ON STARTUP ---
-        # This ensures schema is always correct. 
-        # COMMENT THIS OUT after first successful run if you want to keep history.
+        # --- NUCLEAR FIX: RESET DB ON STARTUP ---
+        # This deletes the old corrupted file and makes a fresh one.
         db.drop_all()
         db.create_all()
         
