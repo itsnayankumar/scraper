@@ -17,7 +17,7 @@ def send_telegram(token, chat_id, message):
 
 def get_driver():
     chrome_options = Options()
-    chrome_options.add_argument("--headless") # Essential for Docker
+    chrome_options.add_argument("--headless")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
@@ -31,7 +31,6 @@ def resolve_10gbps_link(driver, link, status_callback):
         driver.switch_to.new_window('tab')
         driver.get(link)
         wait = WebDriverWait(driver, 30)
-        # Wait for "Download Here" button
         btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//a[contains(text(), 'Download Here')] | //button[contains(text(), 'Download Here')]")))
         final_link = btn.get_attribute('href')
         driver.close()
@@ -62,7 +61,6 @@ def resolve_all_mirrors(initial_link, mediator_domain, hubdrive_domain, status_c
         # --- MEDIATOR PHASE ---
         if mediator_domain in driver.current_url or "Mediator" in driver.title:
             status_callback("  > Mediator found. Waiting for Timer...")
-            # Wait for "Please Wait" to become "Continue"
             continue_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'CLICK TO CONTINUE')] | //a[contains(text(), 'CLICK TO CONTINUE')]")))
             time.sleep(1)
             status_callback("  > Timer done. Clicking Continue...")
@@ -79,7 +77,7 @@ def resolve_all_mirrors(initial_link, mediator_domain, hubdrive_domain, status_c
             wait.until(EC.presence_of_element_located((By.XPATH, "//a[contains(., 'Download [')]")))
             
             buttons = driver.find_elements(By.XPATH, "//a[contains(., 'Download [')]")
-            status_callback(f"  > Found {len(buttons)} mirrors. extracting...")
+            status_callback(f"  > Found {len(buttons)} mirrors. Extracting...")
             
             for btn in buttons:
                 txt = btn.text
@@ -108,10 +106,13 @@ def run_scraper(base_url, mediator_domain, hubdrive_domain, bot_token, chat_id, 
         soup = BeautifulSoup(resp.text, 'html.parser')
         posts = soup.select('.latest-releases .movie-card')
 
-        # Limit to top 2 posts per run to prevent timeout
         for post in posts[:2]: 
             title = post.select_one('.movie-card-title').get_text(strip=True)
             link = post['href']
+            
+            # --- FIX: Handle Relative URLs ---
+            if link.startswith('/'):
+                link = base_url.rstrip('/') + link
             
             if title in seen_history: continue
             
