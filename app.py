@@ -8,9 +8,9 @@ from flask_login import LoginManager, UserMixin, login_user, login_required, log
 from apscheduler.schedulers.background import BackgroundScheduler
 import scraper_logic
 
-# --- CRITICAL INITIALIZATION ---
+# --- APP CONFIG ---
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.urandom(24)
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'default_key_change_me')
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///scraper.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
@@ -19,7 +19,7 @@ login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = 'login'
 
-# --- MODELS ---
+# --- DATABASE MODELS ---
 class Settings(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     main_site_url = db.Column(db.String(100), default='https://4khdhub.dad')
@@ -54,21 +54,25 @@ def load_user(user_id):
 
 # --- HELPERS ---
 def update_status(message):
-    with app.app_context():
-        status = BotStatus.query.first()
-        if not status: 
-            db.session.add(BotStatus())
-            db.session.commit()
+    try:
+        with app.app_context():
             status = BotStatus.query.first()
-        status.current_action = message
-        status.last_updated = datetime.datetime.utcnow()
-        db.session.commit()
-        print(f"[STATUS] {message}")
+            if not status: 
+                db.session.add(BotStatus())
+                db.session.commit()
+                status = BotStatus.query.first()
+            status.current_action = message
+            status.last_updated = datetime.datetime.utcnow()
+            db.session.commit()
+            print(f"[STATUS] {message}")
+    except: pass
 
 def log_message(message, is_error=False):
-    with app.app_context():
-        db.session.add(Logs(message=message, is_error=is_error))
-        db.session.commit()
+    try:
+        with app.app_context():
+            db.session.add(Logs(message=message, is_error=is_error))
+            db.session.commit()
+    except: pass
 
 def background_job():
     with app.app_context():
@@ -80,11 +84,10 @@ def background_job():
             log_message("Missing BOT_TOKEN or AUTH_CHANNEL env vars", True)
             return
 
-        update_status("🚀 Starting Scheduler...")
+        update_status("🚀 Scheduler Running...")
         history = [h.title for h in History.query.all()]
         
         try:
-            # Pass our helper functions to the scraper
             new_items = scraper_logic.run_scraper(
                 settings.main_site_url, settings.mediator_domain, settings.hubdrive_domain,
                 bot_token, chat_id, history, update_status, log_message
@@ -96,7 +99,6 @@ def background_job():
             log_message(f"Job Failed: {e}", True)
             update_status("❌ Error")
 
-# Start Scheduler only if not in debug mode to prevent duplicates
 if not app.debug or os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
     scheduler = BackgroundScheduler()
     scheduler.add_job(func=background_job, trigger="interval", minutes=30, id='scraper_job')
@@ -106,19 +108,25 @@ if not app.debug or os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
 @app.route('/')
 @login_required
 def dashboard():
-    settings = Settings.query.first()
-    status = BotStatus.query.first()
-    if not status:
-        status = BotStatus(current_action="Initializing...")
-        db.session.add(status)
-        db.session.commit()
+    try:
+        # DEFENSIVE CODING: Handle None types gracefully
+        settings = Settings.query.first()
+        if not settings:
+            settings = Settings() # Create dummy to prevent crash
+            
+        status = BotStatus.query.first()
+        if not status:
+            status = BotStatus()
+
+        logs = Logs.query.order_by(Logs.timestamp.desc()).limit(50).all()
+        cpu = psutil.cpu_percent()
+        ram = psutil.virtual_memory().percent
+        total = History.query.count()
+        errors = Logs.query.filter_by(is_error=True).count()
         
-    logs = Logs.query.order_by(Logs.timestamp.desc()).limit(50).all()
-    cpu, ram = psutil.cpu_percent(), psutil.virtual_memory().percent
-    total = History.query.count()
-    total_errors = Logs.query.filter_by(is_error=True).count()
-    
-    return render_template('dashboard.html', settings=settings, status=status, logs=logs, cpu=cpu, ram=ram, total=total, errors=total_errors)
+        return render_template('dashboard.html', settings=settings, status=status, logs=logs, cpu=cpu, ram=ram, total=total, errors=errors)
+    except Exception as e:
+        return f"CRITICAL DASHBOARD ERROR: {str(e)}", 500
 
 @app.route('/settings', methods=['POST'])
 @login_required
@@ -132,7 +140,6 @@ def update_settings():
     try: scheduler.reschedule_job(job_id='scraper_job', trigger='interval', minutes=new_interval)
     except: pass
     db.session.commit()
-    flash('Settings Updated')
     return redirect(url_for('dashboard'))
 
 @app.route('/manual-resolve', methods=['POST'])
@@ -140,26 +147,22 @@ def update_settings():
 def manual_resolve():
     url = request.form.get('test_url')
     settings = Settings.query.first()
-    
     manual_result = []
+    
     if url:
         try:
-            # Helper lambda to capture trace updates without writing to DB
-            def trace_callback(msg):
-                manual_result.append(msg)
+            # Simple wrapper to capture trace logs
+            trace_log = []
+            def trace_callback(msg): trace_log.append(msg)
 
             data, trace = scraper_logic.resolve_page_data(
-                url, 
-                settings.mediator_domain, 
-                settings.hubdrive_domain, 
-                trace_callback
+                url, settings.mediator_domain, settings.hubdrive_domain, trace_callback
             )
             
-            # Append detailed trace
             manual_result.append("=== TRACE LOG ===")
             manual_result.extend(trace)
             
-            if data['links']:
+            if data.get('links'):
                 manual_result.append("\n=== SUCCESS: LINKS FOUND ===")
                 for l in data['links']:
                     manual_result.append(f"{l['name']}: {l['url']}")
@@ -171,18 +174,20 @@ def manual_resolve():
         except Exception as e:
             manual_result.append(f"CRITICAL ERROR: {str(e)}")
             
-    # Re-render dashboard
+    # Re-render dashboard manually to pass manual_result
+    # This copies the dashboard logic to prevent context loss
     status = BotStatus.query.first()
     logs = Logs.query.order_by(Logs.timestamp.desc()).limit(50).all()
-    cpu, ram = psutil.cpu_percent(), psutil.virtual_memory().percent
+    cpu = psutil.cpu_percent()
+    ram = psutil.virtual_memory().percent
     total = History.query.count()
+    
     return render_template('dashboard.html', settings=settings, status=status, logs=logs, cpu=cpu, ram=ram, total=total, manual_result=manual_result)
 
 @app.route('/run-now')
 @login_required
 def run_now():
     threading.Thread(target=background_job).start()
-    flash('Job started in background')
     return redirect(url_for('dashboard'))
 
 @app.route('/login', methods=['GET', 'POST'])
@@ -200,12 +205,20 @@ def logout(): logout_user(); return redirect(url_for('login'))
 
 if __name__ == '__main__':
     with app.app_context():
+        # --- NUCLEAR OPTION: RESET DB ON STARTUP ---
+        # This ensures schema is always correct. 
+        # COMMENT THIS OUT after first successful run if you want to keep history.
+        db.drop_all()
         db.create_all()
-        if not User.query.first():
-            u, p = os.environ.get('ADMIN_USERNAME', 'admin'), os.environ.get('ADMIN_PASSWORD', 'admin')
-            db.session.add(User(username=u, password=p))
-            db.session.add(Settings())
-            db.session.add(BotStatus())
-            db.session.commit()
+        
+        # Create Default Admin
+        u = os.environ.get('ADMIN_USERNAME', 'admin')
+        p = os.environ.get('ADMIN_PASSWORD', 'admin')
+        db.session.add(User(username=u, password=p))
+        db.session.add(Settings())
+        db.session.add(BotStatus())
+        db.session.commit()
+        print("DATABASE RESET AND INITIALIZED SUCCESSFULLY")
+            
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
