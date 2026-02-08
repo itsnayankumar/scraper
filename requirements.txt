@@ -1,0 +1,10 @@
+flask
+flask-login
+flask-sqlalchemy
+apscheduler
+requests
+beautifulsoup4
+selenium
+webdriver-manager
+psutil
+gunicorn
