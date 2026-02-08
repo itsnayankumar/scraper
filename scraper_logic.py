@@ -24,7 +24,7 @@ def send_telegram(token, chat_id, message):
     try: requests.post(url, data=payload, timeout=10)
     except Exception as e: print(f"Telegram Error: {e}")
 
-# --- OPTIMIZED BROWSER SETUP ---
+# --- BROWSER SETUP ---
 def get_driver():
     chrome_options = Options()
     chrome_options.add_argument("--headless") 
@@ -33,14 +33,39 @@ def get_driver():
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
     
-    # Anti-Detection / Speed Optimizations
-    chrome_options.add_argument("--disable-extensions")
-    chrome_options.add_argument("--disable-infobars")
-    chrome_options.add_argument("--blink-settings=imagesEnabled=false") # Don't load images (FASTER)
-    chrome_options.page_load_strategy = 'eager' # Don't wait for full page load (FASTER)
+    # Anti-Bot Detection Features
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option('useAutomationExtension', False)
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
 
     return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
+
+# --- HELPER: HANDLE ADS & POPUPS ---
+def click_and_clean(driver, element):
+    """Clicks an element and closes any ad tabs that open."""
+    original_window = driver.current_window_handle
+    
+    # 1. Attempt Click
+    try:
+        driver.execute_script("arguments[0].click();", element)
+        time.sleep(2) # Wait for potential ad to trigger
+    except:
+        return False
+
+    # 2. Check for new tabs (Pop-ups)
+    if len(driver.window_handles) > 1:
+        for window in driver.window_handles:
+            if window != original_window:
+                driver.switch_to.window(window)
+                driver.close()
+        driver.switch_to.window(original_window)
+        return False # Click was consumed by ad, need to retry
+
+    # 3. Check if we were redirected to a bogus URL in the same tab
+    # (Simple check: if URL is very long or suspicious, we go back)
+    # For now, we assume if we are still on the same domain, it failed
+    return True
 
 # --- HELPER: 10GBPS RESOLVER ---
 def resolve_10gbps_link(driver, link, status_callback):
@@ -49,12 +74,22 @@ def resolve_10gbps_link(driver, link, status_callback):
     try:
         driver.switch_to.new_window('tab')
         driver.get(link)
-        wait = WebDriverWait(driver, 25)
+        wait = WebDriverWait(driver, 30)
         
-        # Generic locator for "Download Here"
-        btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "a.btn, button.btn")))
-        final_link = btn.get_attribute('href')
+        # Click "Download Here" with Ad-Busting
+        btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//a[contains(text(), 'Download Here')] | //button[contains(text(), 'Download Here')]")))
         
+        # Try up to 3 times
+        for _ in range(3):
+            click_and_clean(driver, btn)
+            if "drive" in driver.current_url or "google" in driver.current_url or "mega" in driver.current_url:
+                break # Success
+        
+        final_link = driver.current_url
+        # If still on the button page, try grabbing href directly
+        if final_link == link:
+            final_link = btn.get_attribute('href')
+
         driver.close()
         driver.switch_to.window(original_window)
         return final_link
@@ -75,50 +110,59 @@ def resolve_page_data(initial_link, mediator_domain, hubdrive_domain, status_cal
     try:
         status_callback(f"  > Opening Link...")
         driver.get(initial_link)
-        wait = WebDriverWait(driver, 25)
+        wait = WebDriverWait(driver, 30)
         
-        # --- HUBDRIVE PHASE ---
+        # --- PHASE 1: HUBDRIVE ---
         if hubdrive_domain in driver.current_url or "HubDrive" in driver.title:
-            status_callback("  > HubDrive found. Redirecting...")
+            status_callback("  > HubDrive found. Clicking HubCloud...")
             try:
-                # Optimized Size Scraping
+                # Scrape Size
                 try:
                     size_elem = driver.find_element(By.XPATH, "//td[contains(text(), 'File Size')]/following-sibling::td")
                     data["size"] = size_elem.text.strip()
                 except: pass
                 
-                # Robust click
-                hubcloud_btn = wait.until(EC.element_to_be_clickable((By.PARTIAL_LINK_TEXT, "HubCloud Server")))
+                # Click HubCloud Server
+                hubcloud_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//a[contains(text(), 'HubCloud Server')]")))
                 driver.get(hubcloud_btn.get_attribute('href'))
             except: pass
 
-        # --- MEDIATOR PHASE (OPTIMIZED) ---
+        # --- PHASE 2: MEDIATOR (AD BUSTER ADDED) ---
         if mediator_domain in driver.current_url or "Mediator" in driver.title:
             status_callback("  > Mediator found. Waiting for Timer...")
             
-            # Wait for the button to contain "CONTINUE" (Case insensitive XPath)
-            # This handles "Click To Continue", "CLICK TO CONTINUE", etc.
-            xpath_query = "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'continue')] | //a[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'continue')]"
+            # Wait for "Continue"
+            xpath = "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'continue')] | //a[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'continue')]"
+            continue_btn = wait.until(EC.element_to_be_clickable((By.XPATH, xpath)))
+            time.sleep(1.5) # Let JS settle
             
-            continue_btn = wait.until(EC.element_to_be_clickable((By.XPATH, xpath_query)))
+            status_callback("  > Timer done. Clicking (Anti-Ad Mode)...")
             
-            # Small buffer for JS to attach
-            time.sleep(1)
-            
-            # JavaScript Click (Bypasses overlays)
-            driver.execute_script("arguments[0].click();", continue_btn)
-            
-            # Wait for URL to change to hubcloud
-            try:
-                wait.until(lambda d: "hubcloud" in d.current_url or "drive" in d.current_url)
-            except:
-                status_callback("  > Redirect took too long, checking URL anyway...")
+            # Try clicking up to 3 times to kill ads
+            for i in range(3):
+                # Check if we moved on
+                if "hubcloud" in driver.current_url or "drive" in driver.current_url:
+                    break
+                
+                # Perform Click & Clean
+                driver.execute_script("arguments[0].click();", continue_btn)
+                time.sleep(2)
+                
+                # Handle New Tab Ads
+                if len(driver.window_handles) > 1:
+                    driver.switch_to.window(driver.window_handles[1])
+                    driver.close()
+                    driver.switch_to.window(driver.window_handles[0])
+                    status_callback(f"  > Ad Tab Closed. Retrying click {i+2}...")
 
-        # --- HUBCLOUD PHASE ---
+            # Final Wait
+            wait.until(lambda d: "hubcloud" in d.current_url or "drive" in d.current_url)
+
+        # --- PHASE 3: HUBCLOUD ---
         if "hubcloud" in driver.current_url or "drive" in driver.current_url:
-            status_callback("  > HubCloud found. Extracting info...")
+            status_callback("  > HubCloud found. Generating...")
             
-            # 1. Scrape Info (Fast)
+            # Scrape Info if missing
             try:
                 if data["size"] == "N/A":
                     size_elem = driver.find_element(By.XPATH, "//td[contains(text(), 'File Size')]/following-sibling::td")
@@ -127,13 +171,23 @@ def resolve_page_data(initial_link, mediator_domain, hubdrive_domain, status_cal
                 data["filename"] = name_elem.text.strip()
             except: pass
 
-            # 2. Click Generate (JS Click is faster/safer)
+            # Click Generate (Ad-Buster)
             generate_btn = wait.until(EC.presence_of_element_located((By.ID, "download")))
-            driver.execute_script("arguments[0].click();", generate_btn)
             
-            status_callback("  > Waiting for server list...")
-            wait.until(EC.presence_of_element_located((By.XPATH, "//a[contains(., 'Download [')]")))
-            
+            # Try clicking up to 2 times
+            for _ in range(2):
+                driver.execute_script("arguments[0].click();", generate_btn)
+                time.sleep(1)
+                if len(driver.window_handles) > 1:
+                    driver.switch_to.window(driver.window_handles[1])
+                    driver.close()
+                    driver.switch_to.window(driver.window_handles[0])
+                
+                # Check if server list appeared
+                if len(driver.find_elements(By.XPATH, "//a[contains(., 'Download [')]")) > 0:
+                    break
+
+            status_callback("  > Extracting mirrors...")
             buttons = driver.find_elements(By.XPATH, "//a[contains(., 'Download [')]")
             
             for btn in buttons:
@@ -176,33 +230,30 @@ def format_message(data):
     msg += f"<b>Requested By :-</b> {REQUESTED_BY}"
     return msg
 
-# --- MAIN SCRAPER LOGIC ---
+# --- MAIN SCRAPER ---
 def run_scraper(base_url, mediator_domain, hubdrive_domain, bot_token, chat_id, seen_history, status_callback, log_callback):
     new_items = []
     
     try:
         status_callback(f"Scanning Homepage: {base_url}")
         headers = {'User-Agent': 'Mozilla/5.0'}
-        # Shorter timeout for requests
-        resp = requests.get(base_url, headers=headers, timeout=15)
+        resp = requests.get(base_url, headers=headers, timeout=20)
         soup = BeautifulSoup(resp.text, 'html.parser')
         posts = soup.select('.latest-releases .movie-card')
 
         for post in posts[:2]: 
             title_tag = post.select_one('.movie-card-title')
             if not title_tag: continue
-            
             title = title_tag.get_text(strip=True)
             link = post['href']
             
             if link.startswith('/'): link = base_url.rstrip('/') + link
-
             if title in seen_history: continue
             
             log_callback(f"Found new post: {title}")
             status_callback(f"Processing: {title}")
             
-            p_resp = requests.get(link, headers=headers, timeout=15)
+            p_resp = requests.get(link, headers=headers, timeout=20)
             p_soup = BeautifulSoup(p_resp.text, 'html.parser')
             boxes = p_soup.select('.episode-content, .season-content, .download-item')
             
@@ -226,9 +277,9 @@ def run_scraper(base_url, mediator_domain, hubdrive_domain, bot_token, chat_id, 
             
             if found_ep:
                 new_items.append(title)
-                log_callback(f"Sent to Telegram: {title}")
+                log_callback(f"Sent: {title}")
             else:
-                log_callback(f"Skipped {title} (No valid links)")
+                log_callback(f"Skipped {title} (No links)")
                 
     except Exception as e:
         log_callback(f"Critical Error: {str(e)}", True)
