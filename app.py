@@ -9,7 +9,10 @@ from apscheduler.schedulers.background import BackgroundScheduler
 import scraper_logic
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.urandom(24)
+
+# --- CONFIGURATION ---
+# Use a persistent key or generate one.
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', os.urandom(24))
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///scraper.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
@@ -55,7 +58,9 @@ def load_user(user_id):
 def update_status(message):
     with app.app_context():
         status = BotStatus.query.first()
-        if not status: db.session.add(BotStatus()); db.session.commit(); status = BotStatus.query.first()
+        if not status: 
+            status = BotStatus()
+            db.session.add(status)
         status.current_action = message
         status.last_updated = datetime.datetime.utcnow()
         db.session.commit()
@@ -91,6 +96,7 @@ def background_job():
             log_message(f"Job Failed: {e}", True)
             update_status("❌ Error")
 
+# Start Scheduler
 scheduler = BackgroundScheduler()
 scheduler.add_job(func=background_job, trigger="interval", minutes=30, id='scraper_job')
 scheduler.start()
@@ -141,14 +147,26 @@ def login():
 @app.route('/logout')
 def logout(): logout_user(); return redirect(url_for('login'))
 
-if __name__ == '__main__':
-    with app.app_context():
-        db.create_all()
-        if not User.query.first():
-            u, p = os.environ.get('ADMIN_USERNAME', 'admin'), os.environ.get('ADMIN_PASSWORD', 'admin')
-            db.session.add(User(username=u, password=p))
+# --- CRITICAL FIX: DB INIT OUTSIDE MAIN BLOCK ---
+# This ensures tables are created when Gunicorn starts the app
+with app.app_context():
+    db.create_all()
+    
+    # Check if Admin exists, if not create from ENV
+    if not User.query.first():
+        print("⚡ Initializing Database...")
+        u = os.environ.get('ADMIN_USERNAME', 'admin')
+        p = os.environ.get('ADMIN_PASSWORD', 'admin')
+        db.session.add(User(username=u, password=p))
+        
+        if not Settings.query.first():
             db.session.add(Settings())
+        if not BotStatus.query.first():
             db.session.add(BotStatus())
-            db.session.commit()
+            
+        db.session.commit()
+        print("✅ Database Initialized!")
+
+if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
